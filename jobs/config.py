@@ -10,6 +10,15 @@ logging.basicConfig(
 )
 
 
+class ExecutableJobs:
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def execute(self):
+        raise NotImplementedError
+
+
 @dataclass
 class DataConfig:
     source_url: str
