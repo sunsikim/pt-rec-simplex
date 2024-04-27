@@ -1,7 +1,7 @@
 import pytest
 import torch
 import numpy as np
-from simplex.loss import CosineContrastiveLoss
+from simplex.model import CosineContrastiveLoss
 
 
 def test_invalid_margin():
