@@ -1,1 +1,1 @@
-from jobs.preprocess import PreProcessJob
+from jobs.preprocess import Preprocess1MJob, Preprocess20MJob
