@@ -56,7 +56,7 @@ class ValidationDataset(Dataset):
             dtype=torch.int,
         )
         self._positive_target = torch.tensor(
-            dataset["positive_target"],
+            dataset["target"],
             dtype=torch.int,
         )
 

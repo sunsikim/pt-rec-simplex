@@ -13,7 +13,8 @@ from simplex.trainer import SimpleXTrainer
 class TrainJob(ExecutableJobs):
 
     def __init__(self):
-        super(TrainJob, self).__init__(job_name="train")
+        self._job_name = "train"
+        super(TrainJob, self).__init__(job_name=self._job_name)
         self._local_dir = pathlib.Path(config.LOCAL_DIR)
         self._data_dir = pathlib.Path(config.DATA_DIR)
 
@@ -27,7 +28,7 @@ class TrainJob(ExecutableJobs):
         num_items = mid2idx.height
 
         logging.info("Split data into train, validation data")
-        train_data, validation_data = self._split_data(ratings)
+        train_data, validation_data, test_data = self._split_data(ratings)
 
         logging.info("Define model and corresponding trainer")
         model = SimpleXModel(
@@ -42,40 +43,59 @@ class TrainJob(ExecutableJobs):
         logging.info("Train model")
         trainer.execute()
 
-    def _split_data(self, ratings: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
-        validation_data = (
-            ratings.filter(pl.col("interacted_items").list.len() >= 3)
-            .sample(fraction=config.VALIDATION_USER_RATIO)
-            .with_columns(
-                pl.col("interacted_items").list.first().alias("target"),
-                pl.col("interacted_items").list.slice(offset=1).alias("remainder"),
-            )
-            .drop(["interacted_items", "negative_sample_pool"])
+    def _split_data(self, ratings: pl.DataFrame) -> list[pl.DataFrame]:
+        num_holdout_users = int(ratings.height * config.HOLDOUT_RATIO)
+        num_train_users = ratings.height - num_holdout_users
+        validation_feed = ratings.slice(
+            offset=num_train_users,
+            length=num_holdout_users // 2,
         )
-        train_data = (
-            ratings.join(validation_data, on="user_idx", how="left")
-            .with_columns(
-                pl.when(pl.col("remainder").is_null())
-                .then("interacted_items")
-                .otherwise("remainder")
-                .alias("interacted_items")
-            )
-            .drop(["target", "remainder"])
+        validation_feed, validation_data = self._split_user_history(validation_feed)
+        test_feed = ratings.slice(
+            offset=num_train_users + num_holdout_users // 2,
+            length=num_holdout_users // 2,
         )
+        test_feed, test_data = self._split_user_history(test_feed)
+        train_data = ratings.slice(offset=0, length=num_train_users)
+        train_data = self._attach_padding_column(
+            pl.concat([train_data, validation_feed, test_feed])
+        )
+        return [train_data, validation_data, test_data]
 
-        # validation data doesn't need to be sampled afterward, so pad the history and return
-        validation_data = (
-            self._attach_padding_column(validation_data)
-            .rename({"remainder": "interacted_items", "target": "positive_target"})
+    def _split_user_history(
+        self, data: pl.DataFrame
+    ) -> tuple[pl.DataFrame, pl.DataFrame]:
+        holdout_data = (
+            data.with_columns(
+                (pl.col("interacted_items").list.len() * config.HOLDOUT_RATIO)
+                .cast(pl.Int32)
+                .alias("num_targets")
+            )
+            .with_columns(
+                pl.col("interacted_items")
+                .list.slice(offset=0, length="num_targets")
+                .alias("target"),
+                pl.col("interacted_items").list.slice(offset="num_targets"),
+            )
+            .drop("num_targets")
+        )
+        feed_data = holdout_data.drop("target")
+        holdout_data = holdout_data.drop("negative_sample_pool")
+        holdout_data = (
+            self._attach_padding_column(holdout_data)
             .with_columns(
                 pl.col("interacted_items")
                 .list.concat("padding")
                 .list.slice(offset=0, length=config.HISTORY_MAX_LEN)
             )
+            .with_columns(
+                pl.col("target")
+                .list.concat("padding")
+                .list.slice(offset=0, length=config.HISTORY_MAX_LEN)
+            )
             .drop("padding")
         )
-        train_data = self._attach_padding_column(train_data)
-        return train_data, validation_data
+        return feed_data, holdout_data
 
     def _define_model_trainer(
         self,
@@ -91,9 +111,9 @@ class TrainJob(ExecutableJobs):
         )
         return SimpleXTrainer(
             device=f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu",
+            experiment_prefix=self._job_name,
             local_dir=self._local_dir,
             checkpoint_file=config.CHECKPOINT_FILE_NAME,
-            metric_log_file=config.TRAIN_LOG_FILE,
             model=model,
             loss_fn=loss_fn,
             train_data=train_data,
@@ -103,6 +123,7 @@ class TrainJob(ExecutableJobs):
             num_epochs=config.MAX_EPOCH,
             negative_sample_size=config.NEGATIVE_SAMPLE_SIZE,
             max_history_length=config.HISTORY_MAX_LEN,
+            num_validation_products=config.NUM_VALIDATION_PRODUCTS,
         )
 
     def _attach_padding_column(self, data: pl.DataFrame) -> pl.DataFrame:

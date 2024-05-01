@@ -1,10 +1,12 @@
 import polars as pl
 import torch
-import os
 import pathlib
 import time
 import logging
+import numpy as np
+import jobs.config as config
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from simplex.model import CosineContrastiveLoss, SimpleXModel
 from simplex.data import (
     TrainDataset,
@@ -19,8 +21,8 @@ class SimpleXTrainer:
     def __init__(
         self,
         device: str,
+        experiment_prefix: str,
         local_dir: pathlib.Path,
-        metric_log_file: str,
         checkpoint_file: str,
         model: SimpleXModel,
         loss_fn: CosineContrastiveLoss,
@@ -31,24 +33,11 @@ class SimpleXTrainer:
         num_epochs: int,
         negative_sample_size: int,
         max_history_length: int,
+        num_validation_products: int,
     ):
         self.device = device
         self.local_dir = local_dir
         self.checkpoint_path = local_dir.joinpath(checkpoint_file)
-        self.metric_log_path = local_dir.joinpath(metric_log_file)
-        assert self.metric_log_path.suffix == ".csv"
-        if self.metric_log_path.exists():
-            os.remove(self.metric_log_path)
-        header = [
-            "epoch_idx",
-            "elapsed_seconds",
-            "training_loss",
-            "precision_at_5",
-            "precision_at_10",
-            "precision_at_20",
-        ]
-        with open(self.metric_log_path, "a") as file:
-            file.write(",".join(header))
         self.model = model.to(device)
         self.loss_fn = loss_fn
         self.train_data = train_data
@@ -58,9 +47,11 @@ class SimpleXTrainer:
         self.num_epochs = num_epochs
         self.negative_sample_size = negative_sample_size
         self.max_history_length = max_history_length
+        self.experiment_prefix = experiment_prefix
         self._best_validation_metric = 0.0
         self._not_improved_since = 0
-        self._max_down_streak = 5
+        self._max_down_streak = 10
+        self._k = num_validation_products
         self._validation_loader = DataLoader(
             dataset=ValidationDataset(validation_data.to_dict(as_series=False)),
             batch_size=batch_size,
@@ -69,6 +60,13 @@ class SimpleXTrainer:
         )
 
     def execute(self):
+        experiment_name = f"runs/{self.experiment_prefix}/"
+        experiment_name += f"dim={config.EMBEDDING_DIM},"
+        experiment_name += f"margin={config.LOSS_NEGATIVE_MARGIN},"
+        experiment_name += f"weight={config.LOSS_NEGATIVE_WEIGHT},"
+        experiment_name += f"batch={config.BATCH_SIZE},"
+        experiment_name += f"negsize={config.NEGATIVE_SAMPLE_SIZE}"
+        writer = SummaryWriter(experiment_name)
         for epoch_idx in range(1, self.num_epochs + 1):
             # iterate one epoch
             epoch_start_at = time.time()
@@ -77,20 +75,26 @@ class SimpleXTrainer:
             elapsed_seconds = int(time.time() - epoch_start_at)
 
             # record epoch metrics
+            recall, precision, hr, ndcg = validation_metrics
             epoch_result = [epoch_idx, elapsed_seconds, training_loss]
-            epoch_result.extend(validation_metrics)
-            with open(self.metric_log_path, "a") as file:
-                file.write(f"\n{','.join(map(str, epoch_result))}")
+            writer.add_scalar("Loss/CCL", training_loss, epoch_idx)
+            writer.add_scalar(f"Metrics/Recall@{self._k}", recall, epoch_idx)
+            writer.add_scalar(f"Metrics/Precision@{self._k}", precision, epoch_idx)
+            writer.add_scalar(f"Metrics/HR@{self._k}", hr, epoch_idx)
+            writer.add_scalar(f"Metrics/nDCG@{self._k}", ndcg, epoch_idx)
             log_msg = [
-                f"epoch {epoch_result[0]:>3}",
-                f"({epoch_result[1]}s)",
-                f"loss = {epoch_result[2]:.4f}",
-                f"precision at 5 = {epoch_result[3]:.4f}, 10 = {epoch_result[4]:.4f}, 20 = {epoch_result[5]:.4f}",
+                f"epoch {epoch_idx:>3}",
+                f"({elapsed_seconds}s)",
+                f"loss = {training_loss:.4f}",
+                f"recall@{self._k} = {recall:.4f}",
+                f"precision@{self._k} = {precision:.4f}",
+                f"hr@{self._k} = {hr:.4f}",
+                f"nDCG@{self._k} = {ndcg:.4f}",
             ]
             logging.info(" | ".join(log_msg))
 
             # determine early stopping
-            if self._evaluate_early_stopping_criteria(epoch_result[-1]):
+            if self._evaluate_early_stopping_criteria(recall):
                 break
 
     def _train_one_epoch(self) -> float:
@@ -131,32 +135,31 @@ class SimpleXTrainer:
 
         return epoch_loss / (batch_idx + 1)
 
-    def _calculate_validation_metrics(self) -> tuple[float, float, float]:
-        precision_at_5 = torch.tensor([0], device=self.device)
-        precision_at_10 = torch.tensor([0], device=self.device)
-        precision_at_20 = torch.tensor([0], device=self.device)
+    def _calculate_validation_metrics(self) -> tuple[float, float, float, float]:
+        recall = []
+        precision = []
+        hit_ratio = []
+        ndcg = []
         self.model.eval()
         with torch.no_grad():
-            for batch_idx, batch in enumerate(self._validation_loader):
+            for batch in self._validation_loader:
                 user_idx, interacted_items, target = load_batch(
                     batch, device=self.device, training=False
                 )
-                target = target.unsqueeze(dim=-1)
 
                 # calculate cosine similarities over every item
                 cossims = self.model.predict(user_idx, interacted_items)
 
-                # select top 20 items among product pool and calculate validation metrics
-                top_20_items = torch.argsort(cossims, descending=True)[:, :20]
-                precision_at_5 += (top_20_items[:, :5] == target).sum()
-                precision_at_10 += (top_20_items[:, :10] == target).sum()
-                precision_at_20 += (top_20_items == target).sum()
+                # select top k items among product pool and calculate validation metrics
+                pred = torch.argsort(cossims, descending=True)[:, : self._k].cpu()
+                pred = pred.numpy()
+                true = target.cpu().numpy()
+                recall.append(self.calculate_batch_recall(pred, true))
+                precision.append(self.calculate_batch_precision(pred, true))
+                hit_ratio.append(self.calculate_batch_hr(pred, true))
+                ndcg.append(self.calculate_batch_ndcg(pred, true))
 
-        denominator = (batch_idx + 1) * self.batch_size
-        precision_at_5 = precision_at_5.to("cpu").item() / denominator
-        precision_at_10 = precision_at_10.to("cpu").item() / denominator
-        precision_at_20 = precision_at_20.to("cpu").item() / denominator
-        return precision_at_5, precision_at_10, precision_at_20
+        return np.mean(recall), np.mean(precision), np.mean(hit_ratio), np.mean(ndcg)
 
     def _evaluate_early_stopping_criteria(self, criteria: float) -> bool:
         early_stop = False
@@ -173,3 +176,46 @@ class SimpleXTrainer:
             )
             early_stop = True
         return early_stop
+
+    @staticmethod
+    def calculate_batch_precision(top_k_items: np.array, target: np.array) -> float:
+        """
+        proportion of recommended items in the top-k set that are relevant
+        """
+        num_hits = [len(np.intersect1d(x[0], x[1])) for x in zip(top_k_items, target)]
+        batch_precision = np.array(num_hits) / top_k_items.shape[1]
+        return np.mean(batch_precision)
+
+    @staticmethod
+    def calculate_batch_recall(top_k_items: np.array, target: np.array) -> float:
+        """
+        proportion of relevant items found in the top-k recommendations
+        """
+        num_selected = np.sum(target != 0, axis=1)[:, np.newaxis]
+        num_hits = [len(np.intersect1d(x[0], x[1])) for x in zip(top_k_items, target)]
+        batch_recall = np.array(num_hits) / num_selected
+        return np.mean(batch_recall)
+
+    @staticmethod
+    def calculate_batch_hr(top_k_items: np.array, target: np.array) -> float:
+        """
+        proportion of users which gets recommendation that contains one of relevant items
+        """
+        num_hits = [len(np.intersect1d(x[0], x[1])) for x in zip(top_k_items, target)]
+        is_hit_user = np.array(num_hits) > 0
+        hit_ratio = np.sum(is_hit_user) / top_k_items.shape[0]
+        return hit_ratio
+
+    @staticmethod
+    def calculate_batch_ndcg(top_k_items: np.array, target: np.array) -> float:
+        """
+        metric scaling from 0 to 1 that rewards result with relevant items placed in higher priority
+        """
+        binary_pred = []
+        for top_k_item, true in zip(top_k_items, target):
+            binary_pred.append([1 if item in true else 0 for item in top_k_item])
+        binary_pred = np.array(binary_pred)
+        denominator = np.log2(1 + np.arange(start=1, stop=binary_pred.shape[1] + 1))
+        dcg = np.sum(binary_pred / denominator, axis=1)
+        idcg = (1 / denominator).sum()
+        return np.mean(dcg / idcg)
