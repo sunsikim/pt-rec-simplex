@@ -15,6 +15,8 @@ MOVIE_INDEX_MAP_FILE_NAME = "mid2idx.parquet"
 ML_1M_SOURCE_URL = "https://files.grouplens.org/datasets/movielens/ml-1m.zip"
 ML_20M_SOURCE_URL = "https://files.grouplens.org/datasets/movielens/ml-20m.zip"
 CHECKPOINT_FILE_NAME = "ckpt.pt"
+RECOMMENDATION_RESULT_FILE_NAME = "result.parquet"
+METRIC_RESULT_FILE_NAME = "metrics.csv"
 # Preprocess
 HISTORY_MAX_LEN = 100
 MIN_INTERACTIONS = 20

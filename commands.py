@@ -24,7 +24,7 @@ def run_jobs(
             show_default=True,
             help="comma-separated text of job names to be executed",
         ),
-    ] = "preprocess-1m,train"
+    ] = "preprocess-1m,train,preprocess-20m,evaluate"
 ):
     # register executable jobs
     executable_jobs = {}
