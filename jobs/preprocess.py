@@ -133,8 +133,7 @@ class Preprocess1MJob(PreprocessJob, ExecutableJobs):
     Download MovieLens 1M data from source, preprocess raw data and save preprocessed data
     """
 
-    def __init__(self):
-        job_name = "preprocess-1m"
+    def __init__(self, job_name: str = "preprocess-1m"):
         PreprocessJob.__init__(self, job_name)
         ExecutableJobs.__init__(self, job_name)
 
@@ -171,8 +170,7 @@ class Preprocess20MJob(PreprocessJob, ExecutableJobs):
     Download MovieLens 20M data from source, preprocess raw data and save preprocessed data
     """
 
-    def __init__(self):
-        job_name = "preprocess-20m"
+    def __init__(self, job_name: str = "preprocess-20m"):
         PreprocessJob.__init__(self, job_name)
         ExecutableJobs.__init__(self, job_name)
 
