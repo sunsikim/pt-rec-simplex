@@ -86,8 +86,8 @@ class EvaluateJob(ExecutableJobs):
             }
         )
 
-        logging.info("Save evaluation result")
-        result.write_parquet(
+        logging.info("Save randomly sampled 1000 evaluation result to present in demo")
+        result.sample(n=1000).write_parquet(
             self._local_dir.joinpath(config.RECOMMENDATION_RESULT_FILE_NAME)
         )
         with open(
