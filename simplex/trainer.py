@@ -63,7 +63,6 @@ class SimpleXTrainer:
         experiment_name = f"runs/{self.experiment_prefix}/"
         experiment_name += f"dim={config.EMBEDDING_DIM},"
         experiment_name += f"margin={config.LOSS_NEGATIVE_MARGIN},"
-        experiment_name += f"weight={config.LOSS_NEGATIVE_WEIGHT},"
         experiment_name += f"batch={config.BATCH_SIZE},"
         experiment_name += f"negsize={config.NEGATIVE_SAMPLE_SIZE}"
         writer = SummaryWriter(experiment_name)
@@ -191,7 +190,7 @@ class SimpleXTrainer:
         """
         proportion of relevant items found in the top-k recommendations
         """
-        num_selected = np.sum(target != 0, axis=1)[:, np.newaxis]
+        num_selected = np.sum(target != 0, axis=1)
         num_hits = [len(np.intersect1d(x[0], x[1])) for x in zip(top_k_items, target)]
         batch_recall = np.array(num_hits) / num_selected
         return np.mean(batch_recall)
